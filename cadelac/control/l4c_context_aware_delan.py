@@ -9,7 +9,7 @@ import l4casadi as l4c
 from l4casadi.naive.nn import activation as activations
 from l4casadi.naive.nn.linear import Linear as l4c_Linear
 
-from cadelac.learning.models.context_aware_delan import LSTMModel
+from cadelac.learning.models.context_aware_delan import LSTMModel, TCNModel
 
 class ComponentNNNaive(l4c.naive.NaiveL4CasADiModule):
     def __init__(self, n_input, n_ouput, net_arch = None, 
@@ -153,6 +153,7 @@ class L4CContextAwareDeLaN():
         self.softplus_beta = 1.0
         self.device = device
         self.hist_length = hyper.get('hist_length', 0)
+        self.history_encoder = hyper.get('history_encoder', 'lstm')  # Default to LSTM for backward compatibility
 
         self.state_dict = torch_model['state_dict']
 
@@ -225,21 +226,44 @@ class L4CContextAwareDeLaN():
             enc_eval_delan = cs.MX.sym("enc", self.n_enc_input, 1)
             x_eval_delan = cs.vertcat(x_eval_delan, enc_eval_delan)
 
-        # LSTM
+        # History Encoder (LSTM or TCN)
         if self.hist_length > 0:
             self.n_lstm_input = hyper['n_lstm_input']
             self.n_lstm_hidden = hyper['n_lstm_hidden']
             self.n_lstm_depth = hyper['n_lstm_depth']
-            self.lstm = LSTMModel(self.n_lstm_input, self.n_lstm_hidden, self.n_enc_input, self.n_lstm_depth)
-            lstm_dict = {}
-            for key, values in self.state_dict.items():
-                if 'lstm' in key:
-                    lstm_dict.update({key.removeprefix('lstm.'): values})
-            self.lstm.load_state_dict(lstm_dict)
+            
+            # Load encoder based on type
+            if self.history_encoder == 'lstm':
+                self.hist_encoder = LSTMModel(self.n_lstm_input, self.n_lstm_hidden, self.n_enc_input, self.n_lstm_depth)
+            elif self.history_encoder == 'tcn':
+                tcn_channels = hyper.get('tcn_channels', [32, 32, 16, 16])
+                tcn_kernel_size = hyper.get('tcn_kernel_size', 3)
+                tcn_dropout = hyper.get('tcn_dropout', 0.1)
+                self.hist_encoder = TCNModel(self.n_lstm_input, self.n_enc_input, 
+                                            num_channels=tcn_channels,
+                                            kernel_size=tcn_kernel_size,
+                                            dropout=tcn_dropout)
+            elif self.history_encoder == 'none':
+                self.hist_encoder = None
+            else:
+                raise ValueError(f"Unknown history_encoder: {self.history_encoder}")
+            
+            # Load encoder weights
+            if self.hist_encoder is not None:
+                encoder_dict = {}
+                for key, values in self.state_dict.items():
+                    if 'lstm' in key:
+                        encoder_dict.update({key.removeprefix('lstm.'): values})
+                self.hist_encoder.load_state_dict(encoder_dict)
+            
+            # Keep lstm attribute for backward compatibility
+            self.lstm = self.hist_encoder
 
         if self.device == 'cuda':
             self.inertia_net = self.inertia_net.to('cuda')
             self.potential_net = self.potential_net.to('cuda')
+            if hasattr(self, 'hist_encoder') and self.hist_encoder is not None:
+                self.hist_encoder = self.hist_encoder.to('cuda')
 
     def lower_tri_inertia_fn(self, q, enc_input):
         output = self.inertia_net(q, enc_input).view(-1)
@@ -307,7 +331,20 @@ class L4CContextAwareDeLaN():
         return l, dldq, V, dVdq
 
 
-    def eval_lstm_np(self, input_np):
-        input = torch.from_numpy(input_np).float().view(1,self.hist_length,-1)
-        output = self.lstm(input).view(-1)
+    def eval_hist_encoder_np(self, input_np):
+        """Unified method to evaluate history encoder (LSTM or TCN) from numpy input."""
+        if self.hist_length == 0:
+            return np.zeros(self.n_enc_input)
+        
+        if self.hist_encoder is None:
+            return np.zeros(self.n_enc_input)
+        
+        input = torch.from_numpy(input_np).float().view(1, self.hist_length, -1)
+        if self.device == 'cuda':
+            input = input.to('cuda')
+        output = self.hist_encoder(input).view(-1)
         return output.cpu().detach().numpy()
+
+    def eval_lstm_np(self, input_np):
+        """Backward compatibility method - calls eval_hist_encoder_np."""
+        return self.eval_hist_encoder_np(input_np)

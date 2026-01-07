@@ -81,6 +81,39 @@ class LSTMModel(nn.Module):
         # Pass through the fully connected layer (output at the last time step)
         out = self.fc(out[:, -1, :])  # Use the last hidden state for output prediction
         return out
+
+class TCNModel(nn.Module):
+    def __init__(self, input_size, output_size, num_channels=None, kernel_size=3, dropout=0.1):
+        super(TCNModel, self).__init__()
+        
+        # Import TCN here to avoid dependency issues if not installed
+        from pytorch_tcn.tcn import TCN
+        
+        # Default architecture: gradual reduction to output size
+        if num_channels is None:
+            num_channels = [32, 32, 16, 16]
+        
+        # TCN expects input shape (batch, channels, seq_len)
+        # We'll need to transpose from (batch, seq_len, features)
+        self.tcn = TCN(input_size, num_channels, kernel_size=kernel_size, dropout=dropout)
+        
+        # Fully connected layer to produce the output
+        self.fc = nn.Linear(num_channels[-1], output_size)
+    
+    def forward(self, x):
+        # x: (batch, seq_len, input_size)
+        # TCN expects: (batch, input_size, seq_len)
+        x = x.transpose(1, 2)
+        
+        # Forward through TCN
+        out = self.tcn(x)  # out: (batch, num_channels[-1], seq_len)
+        
+        # Use the last time step
+        out = out[:, :, -1]  # out: (batch, num_channels[-1])
+        
+        # Pass through FC layer
+        out = self.fc(out)  # out: (batch, output_size)
+        return out
     
 class ContextAwareDeLaN(nn.Module):
     def __init__(self, n_dof, **kwargs):
@@ -92,6 +125,7 @@ class ContextAwareDeLaN(nn.Module):
         self.n_lstm_input = kwargs.get("n_lstm_input", 1)
         self.n_lstm_depth = kwargs.get("n_lstm_depth", 1)
         self.hist_length = kwargs.get("hist_length", 1)
+        self.history_encoder = kwargs.get("history_encoder", "lstm")  # 'lstm', 'tcn', or 'none'
         self.activation_name = kwargs.get("activation", 'Tanh')
         self.epsilon = kwargs.get("diagonal_epsilon", 1.e-5)
         self.shift = kwargs.get("diagonal_shift", 0.0)
@@ -118,8 +152,25 @@ class ContextAwareDeLaN(nn.Module):
 
         self.inertia_net = ComponentNN(self.n_dof, self.l_output_size, **kwargs_inertia)
         self.potential_net = ComponentNN(self.n_dof, 1, **kwargs_pot)
+        
+        # History encoder selection
         if self.hist_length > 0:
-            self.lstm = LSTMModel(self.n_lstm_input, self.n_lstm_hidden, self.n_enc_input, self.n_lstm_depth)
+            # Backward compatibility: if history_encoder not specified, use LSTM
+            if self.history_encoder == "lstm":
+                self.lstm = LSTMModel(self.n_lstm_input, self.n_lstm_hidden, self.n_enc_input, self.n_lstm_depth)
+            elif self.history_encoder == "tcn":
+                # TCN with fixed default architecture
+                tcn_channels = kwargs.get("tcn_channels", [32, 32, 16, 16])
+                tcn_kernel_size = kwargs.get("tcn_kernel_size", 3)
+                tcn_dropout = kwargs.get("tcn_dropout", 0.1)
+                self.lstm = TCNModel(self.n_lstm_input, self.n_enc_input, 
+                                    num_channels=tcn_channels, 
+                                    kernel_size=tcn_kernel_size,
+                                    dropout=tcn_dropout)
+            elif self.history_encoder == "none":
+                self.lstm = None
+            else:
+                raise ValueError(f"Unknown history_encoder: {self.history_encoder}. Must be 'lstm', 'tcn', or 'none'.")
 
         # Calculate the indices of the diagonal elements of L:
         idx_diag = np.arange(self.n_dof) + 1
@@ -134,6 +185,9 @@ class ContextAwareDeLaN(nn.Module):
         self._idx = np.arange(cat_idx.size)[order]
 
         self._eye = torch.eye(self.n_dof).view(1, self.n_dof, self.n_dof)
+
+        # Initialize device attribute
+        self.device = self._eye.device
 
         # Compute Matrix Indices
         self.tril_indices = np.tril_indices(self.n_dof)
@@ -245,7 +299,11 @@ class ContextAwareDeLaN(nn.Module):
         if self.hist_length == 0:
             out = self.dyn_model(q, qd, qdd)
         else:
-            enc_input = self.lstm(lstm_input)
+            if self.lstm is not None:
+                enc_input = self.lstm(lstm_input)
+            else:
+                # No encoder case - use zeros
+                enc_input = torch.zeros((q.shape[0], self.n_enc_input), device=q.device)
             out = self.dyn_model(q, qd, qdd, enc_input)
         tau_pred = out[0]
         dEdt = out[1]
@@ -255,7 +313,11 @@ class ContextAwareDeLaN(nn.Module):
         if self.hist_length == 0:
             out = self.dyn_model(q, qd, qdd)
         else:
-            enc_input = self.lstm(lstm_input)
+            if self.lstm is not None:
+                enc_input = self.lstm(lstm_input)
+            else:
+                # No encoder case - use zeros
+                enc_input = torch.zeros((q.shape[0], self.n_enc_input), device=q.device)
             out = self.dyn_model(q, qd, qdd, enc_input)
         tau_pred = out[0]
         return tau_pred

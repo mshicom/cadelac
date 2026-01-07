@@ -24,3 +24,4 @@ dependencies:
   - ninja>=1.11
   - dill
   - PyQt5
+  - git+https://github.com/paul-krug/pytorch-tcn.git

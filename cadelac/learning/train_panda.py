@@ -24,7 +24,15 @@ if __name__ == "__main__":
     parser.add_argument("-l", nargs=1, type=int, required=False, default=[1, ], help="Load the DeLaN model")
     parser.add_argument("-m", nargs=1, type=int, required=False, default=[1, ], help="Save the DeLaN model")
     parser.add_argument("-f", nargs=1, type=int, required=False, default=[0, ], help="Learn full robot model")
+    parser.add_argument("-e", "--encoder", type=str, required=False, default="lstm", 
+                       help="History encoder type: 'lstm' (default), 'tcn', or 'none'")
     seed, cuda, render, load_model, save_model, full_model = init_env(parser.parse_args())
+    
+    # Get encoder type from args
+    args = parser.parse_args()
+    history_encoder = args.encoder.lower()
+    if history_encoder not in ['lstm', 'tcn', 'none']:
+        raise ValueError(f"Invalid encoder type: {history_encoder}. Must be 'lstm', 'tcn', or 'none'.")
 
     # Construct Hyperparameters:
     nn_id = "ContextAware" # Equivalent to DeLaN for hist_length = 0
@@ -128,13 +136,17 @@ if __name__ == "__main__":
              'n_lstm_input': n_lstm_input,
              'n_lstm_depth': n_lstm_depth,
              'hist_length': hist_length,
+             'history_encoder': history_encoder,  # Store encoder type in hyper dict
              'act_ld': 'Softplus',
              'max_epoch': 1000
             }
 
+    # Update model name to include encoder type
     model_name = 'epochs_' + str(hyper['max_epoch'])
     if add_noise_to_load_data:
         model_name += '_noise_'
+    if hist_length > 0:
+        model_name += f'_enc_{history_encoder}_'  # Include encoder type in model name
     model_name += dataset_name + '.torch'
 
     # Loading trained model for IROS2025
