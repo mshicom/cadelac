@@ -733,30 +733,137 @@ class PandaMPCSim(PandaSim):
         axes[0].set_title(f'End-effector Velocity')
 
 if __name__ == "__main__":
-    panda_mpc = PandaMPCSim(use_viewer=False,
-                            expl_dyn=False,
-                            )
+    import argparse
+    
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='Run MPC simulation with optional side-by-side comparison')
+    parser.add_argument('--compare', action='store_true', help='Enable side-by-side comparison mode')
+    parser.add_argument('--lstm-model', type=str, default=None, help='Path to LSTM model checkpoint')
+    parser.add_argument('--tcn-model', type=str, default=None, help='Path to TCN model checkpoint')
+    parser.add_argument('--seed', type=int, default=0, help='Random seed for reproducibility')
+    parser.add_argument('--sim-time', type=float, default=10.0, help='Simulation time in seconds')
+    parser.add_argument('--use-viewer', action='store_true', help='Enable MuJoCo viewer')
+    args = parser.parse_args()
+    
+    if args.compare:
+        # Side-by-side comparison mode
+        if args.lstm_model is None or args.tcn_model is None:
+            raise ValueError("Both --lstm-model and --tcn-model must be provided for comparison mode")
+        
+        import torch
+        from cadelac.control.l4c_context_aware_delan import L4CContextAwareDeLaN
+        
+        # Load models
+        print("Loading LSTM model...")
+        lstm_checkpoint = torch.load(args.lstm_model, map_location='cpu', weights_only=False)
+        lstm_delan = L4CContextAwareDeLaN(lstm_checkpoint, n_dof=7, n_enc_input=lstm_checkpoint['hyper']['n_enc_input'])
+        
+        print("Loading TCN model...")
+        tcn_checkpoint = torch.load(args.tcn_model, map_location='cpu', weights_only=False)
+        tcn_delan = L4CContextAwareDeLaN(tcn_checkpoint, n_dof=7, n_enc_input=tcn_checkpoint['hyper']['n_enc_input'])
+        
+        # Get hist_length from models
+        lstm_hist_length = lstm_checkpoint['hyper'].get('hist_length', 0)
+        tcn_hist_length = tcn_checkpoint['hyper'].get('hist_length', 0)
+        
+        # Run LSTM simulation
+        print("\n" + "="*60)
+        print("Running LSTM Model Simulation")
+        print("="*60)
+        panda_mpc_lstm = PandaMPCSim(
+            use_viewer=args.use_viewer,
+            expl_dyn=True,
+            delan_model=lstm_delan,
+            sim_total_time=args.sim_time,
+            name_suffix='_lstm_comparison',
+            hist_length=lstm_hist_length,
+        )
+        panda_mpc_lstm.reset(seed=args.seed)
+        
+        Nsim = int(args.sim_time / panda_mpc_lstm.joint_ctrl_period)
+        init_time_lstm = time.time()
+        for i in range(Nsim):
+            panda_mpc_lstm.step()
+        total_time_lstm = time.time() - init_time_lstm
+        
+        panda_mpc_lstm.convert_log_data_to_np()
+        lstm_rms_error = np.sqrt(np.mean(np.square(panda_mpc_lstm.logged_data['qp_ref']-panda_mpc_lstm.logged_data['qp']),axis=0))
+        lstm_avg_solver_time = panda_mpc_lstm.time_solver / Nsim
+        
+        # Run TCN simulation
+        print("\n" + "="*60)
+        print("Running TCN Model Simulation")
+        print("="*60)
+        panda_mpc_tcn = PandaMPCSim(
+            use_viewer=args.use_viewer,
+            expl_dyn=True,
+            delan_model=tcn_delan,
+            sim_total_time=args.sim_time,
+            name_suffix='_tcn_comparison',
+            hist_length=tcn_hist_length,
+        )
+        panda_mpc_tcn.reset(seed=args.seed)
+        
+        init_time_tcn = time.time()
+        for i in range(Nsim):
+            panda_mpc_tcn.step()
+        total_time_tcn = time.time() - init_time_tcn
+        
+        panda_mpc_tcn.convert_log_data_to_np()
+        tcn_rms_error = np.sqrt(np.mean(np.square(panda_mpc_tcn.logged_data['qp_ref']-panda_mpc_tcn.logged_data['qp']),axis=0))
+        tcn_avg_solver_time = panda_mpc_tcn.time_solver / Nsim
+        
+        # Print comparison summary
+        print("\n" + "="*60)
+        print("COMPARISON SUMMARY")
+        print("="*60)
+        print(f"\nSimulation Time: {args.sim_time}s")
+        print(f"Random Seed: {args.seed}")
+        print(f"\nLSTM Model:")
+        print(f"  Total Time: {total_time_lstm:.3f}s")
+        print(f"  Avg Step Time: {total_time_lstm/Nsim:.4f}s")
+        print(f"  Avg Solver Time: {lstm_avg_solver_time:.4f}s")
+        print(f"  RMS Joint Tracking Error: {lstm_rms_error}")
+        print(f"  Mean RMS Error: {np.mean(lstm_rms_error):.6f} rad")
+        
+        print(f"\nTCN Model:")
+        print(f"  Total Time: {total_time_tcn:.3f}s")
+        print(f"  Avg Step Time: {total_time_tcn/Nsim:.4f}s")
+        print(f"  Avg Solver Time: {tcn_avg_solver_time:.4f}s")
+        print(f"  RMS Joint Tracking Error: {tcn_rms_error}")
+        print(f"  Mean RMS Error: {np.mean(tcn_rms_error):.6f} rad")
+        
+        print(f"\nDifference (TCN - LSTM):")
+        print(f"  Mean RMS Error Diff: {np.mean(tcn_rms_error) - np.mean(lstm_rms_error):.6f} rad")
+        print(f"  Solver Time Diff: {tcn_avg_solver_time - lstm_avg_solver_time:.4f}s")
+        
+        # Save logs
+        print(f"\nLogs saved with suffixes: '_lstm_comparison' and '_tcn_comparison'")
+        
+    else:
+        # Original single simulation mode
+        panda_mpc = PandaMPCSim(use_viewer=args.use_viewer,
+                                expl_dyn=False,
+                                )
 
-    # Simulation Parameters
-    Tsim = 10
-    Nsim = int(Tsim / panda_mpc.joint_ctrl_period)
+        # Simulation Parameters
+        Tsim = args.sim_time
+        Nsim = int(Tsim / panda_mpc.joint_ctrl_period)
 
-    init_time = time.time()
-    # Simulate
-    for i in range(Nsim):
-        panda_mpc.step()
-        # if i == Nsim/2:
-        #     panda_sim.reset()
+        init_time = time.time()
+        # Simulate
+        for i in range(Nsim):
+            panda_mpc.step()
 
-    print(f'Sim total time {time.time() - init_time} | Avg step time {(time.time() - init_time)/Nsim}')
+        print(f'Sim total time {time.time() - init_time} | Avg step time {(time.time() - init_time)/Nsim}')
 
-    panda_mpc.convert_log_data_to_np()
-    panda_mpc.plot_joint_pos()
-    panda_mpc.plot_joint_vel()
-    panda_mpc.plot_torque()
-    panda_mpc.plot_ee_pos_3d()
+        panda_mpc.convert_log_data_to_np()
+        panda_mpc.plot_joint_pos()
+        panda_mpc.plot_joint_vel()
+        panda_mpc.plot_torque()
+        panda_mpc.plot_ee_pos_3d()
 
-    rms_error = np.sqrt(np.mean(np.square(panda_mpc.logged_data['qp_ref']-panda_mpc.logged_data['qp']),axis=0))
-    print(f'rms_error {rms_error} | q_init {panda_mpc.q_init} | q_home {panda_mpc.q_home}')
+        rms_error = np.sqrt(np.mean(np.square(panda_mpc.logged_data['qp_ref']-panda_mpc.logged_data['qp']),axis=0))
+        print(f'rms_error {rms_error} | q_init {panda_mpc.q_init} | q_home {panda_mpc.q_home}')
 
     plt.show()
