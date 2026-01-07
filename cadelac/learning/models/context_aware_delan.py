@@ -87,7 +87,7 @@ class TCNModel(nn.Module):
         super(TCNModel, self).__init__()
         
         # Import TCN here to avoid dependency issues if not installed
-        from tcn import TemporalConvNet
+        from pytorch_tcn.tcn import TCN
         
         # Default architecture: gradual reduction to output size
         if num_channels is None:
@@ -95,7 +95,7 @@ class TCNModel(nn.Module):
         
         # TCN expects input shape (batch, channels, seq_len)
         # We'll need to transpose from (batch, seq_len, features)
-        self.tcn = TemporalConvNet(input_size, num_channels, kernel_size=kernel_size, dropout=dropout)
+        self.tcn = TCN(input_size, num_channels, kernel_size=kernel_size, dropout=dropout)
         
         # Fully connected layer to produce the output
         self.fc = nn.Linear(num_channels[-1], output_size)
@@ -185,6 +185,9 @@ class ContextAwareDeLaN(nn.Module):
         self._idx = np.arange(cat_idx.size)[order]
 
         self._eye = torch.eye(self.n_dof).view(1, self.n_dof, self.n_dof)
+
+        # Initialize device attribute
+        self.device = self._eye.device
 
         # Compute Matrix Indices
         self.tril_indices = np.tril_indices(self.n_dof)
